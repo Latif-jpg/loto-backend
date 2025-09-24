@@ -1,0 +1,21 @@
+{
+  "name": "loto-backend",
+  "version": "1.0.0",
+  "description": "Backend pour Lotoemploi",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.12.2",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^4.19.2",
+    "@supabase/supabase-js": "^2.45.3"
+  }
+}
