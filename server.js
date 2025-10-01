@@ -1,9 +1,11 @@
+// loto-backend/server.js
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import 'dotenv/config'; 
 import axios from 'axios'; 
 import twilio from 'twilio'; 
+import url from 'url';
 
 // --- CONFIGURATION INITIALE & CLÉS ---
 
@@ -13,12 +15,19 @@ const app = express();
 app.use(express.json()); 
 app.use(express.urlencoded({ extended: true }));
 
+// ⚡ Définition de l'URL de base pour les webhooks (CRITIQUE)
+// Cela permet de garantir que les URLs de callback PayDunya sont correctes.
+const PORT = process.env.PORT || 10000; 
+const BASE_URL = process.env.SERVER_BASE_URL || `http://localhost:${PORT}`;
+
+
 // --- CONFIGURATION PAYDUNYA (Vos clés sont dans .env) ---
 const PAYDUNYA_MASTER_KEY = process.env.PAYDUNYA_MASTER_KEY; 
 const PAYDUNYA_PRIVATE_KEY = process.env.PAYDUNYA_PRIVATE_KEY; 
 const PAYDUNYA_TOKEN = process.env.PAYDUNYA_TOKEN; 
 const PAYDUNYA_PUBLIC_KEY = process.env.PAYDUNYA_PUBLIC_KEY; 
 
+// Utiliser les vraies URLs PayDunya, ou celles de sandbox si vous êtes sûr
 const PAYDUNYA_API_URL = `https://app.paydunya.com/sandbox-api/v1/checkout-invoice/create`;
 const PAYDUNYA_VERIFY_URL = `https://app.paydunya.com/sandbox-api/v1/checkout-invoice/confirm/`;
 
@@ -71,21 +80,18 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 /**
  * Crée une clé unique et normalisée à partir des informations principales.
- * L'email est retiré de la clé pour plus de stabilité.
  */
 const createUniqueKey = (nom, prenom, telephone, reference_cnib) => {
-    // Fonction utilitaire pour normaliser
     const normalize = (str) => {
-        // Garantit que str est une chaîne de caractères, même si null ou undefined est passé
-        const safeStr = String(str || ''); 
+        const safeStr = String(str || '').trim(); 
+        if (safeStr === 'null' || safeStr === 'undefined') return ''; // Gérer les chaînes vides
         
         return safeStr
                .toLowerCase()
-               .replace(/\s/g, '') // Supprime tous les espaces
-               .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Supprime les accents
+               .replace(/\s/g, '') 
+               .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); 
     };
 
-    // Concaténer les champs normalisés CRITIQUES SEULEMENT
     const key = 
         normalize(nom) + 
         '|' + 
@@ -93,7 +99,7 @@ const createUniqueKey = (nom, prenom, telephone, reference_cnib) => {
         '|' + 
         normalize(telephone) + 
         '|' + 
-        normalize(reference_cnib); // La CNI est gardée car elle est obligatoire
+        normalize(reference_cnib);
 
     return key;
 };
@@ -165,6 +171,7 @@ async function sendWhatsAppTicket(recipientNumber, ticketList, paymentToken) {
     }
 
     // Assurez-vous que le numéro est au format WhatsApp (ex: whatsapp:+226xxxxxxx)
+    // On assume que le numéro du Bénin commence par +226
     const whatsappRecipient = 'whatsapp:+226' + recipientNumber.replace(/\s/g, ''); 
     
     const tickets = ticketList.join(', ');
@@ -189,66 +196,71 @@ async function sendWhatsAppTicket(recipientNumber, ticketList, paymentToken) {
 
 // --- ROUTES API ---
 
-app.get("/", (req, res) => res.send("Backend LotoEmploi fonctionne ! Version V25 (Clé Unique stabilisée)."));
+app.get("/", (req, res) => res.send("Backend LotoEmploi fonctionne ! Version finale (Stabilité du flux assurée)."));
 
-// 0. Route d'Inscription Utilisateur (Table: utilisateurs) - FIND OR CREATE CORRIGÉE ET STABILISÉE
+// 0. Route d'Inscription Utilisateur (Table: utilisateurs) - FIND OR CREATE
 app.post("/api/register-user", async (req, res) => {
-    // Déstructuration des champs reçus du frontend.
-    const { nom, prenom, telephone, reference_cni, email } = req.body;
-    
-    // reference_cnib est la variable locale utilisée pour la CNI
-    const reference_cnib = reference_cni; 
+    // 🎯 SIMPLIFICATION : Renomme reference_cni (frontend) en reference_cnib (DB) à la déstructuration
+    const { nom, prenom, telephone, reference_cni: reference_cnib, email } = req.body; 
 
     // 0. Vérification des données critiques
     if (!nom || !prenom || !telephone || !reference_cnib)
         return res.status(400).json({ error: "Les champs Nom, Prénom, Téléphone et Référence CNI sont obligatoires." });
         
-    // 1. Création de la clé unique normalisée (maintenant stable)
+    // 1. Création de la clé unique normalisée
     const uniqueKey = createUniqueKey(nom, prenom, telephone, reference_cnib);
 
-    // 2. Chercher un utilisateur existant en utilisant la clé unique
-    let { data: existingUsers, error: searchError } = await supabase
-        .from("utilisateurs")
-        .select("id")
-        .eq("unique_key", uniqueKey); 
+    try {
+        // 2. Chercher un utilisateur existant en utilisant la clé unique
+        let { data: existingUsers, error: searchError } = await supabase
+            .from("utilisateurs")
+            .select("id")
+            .eq("unique_key", uniqueKey); 
 
-    if (searchError) { 
-        console.error("Erreur Supabase Recherche:", searchError.message);
-        return res.status(500).json({ error: "Erreur lors de la recherche de l'utilisateur existant." });
-    }
+        if (searchError) { 
+            console.error("Erreur Supabase Recherche:", searchError.message);
+            return res.status(500).json({ error: "Erreur lors de la recherche de l'utilisateur existant." });
+        }
 
-    if (existingUsers && existingUsers.length > 0) {
-        // 3. Utilisateur trouvé. On retourne l'ID existant et on arrête le processus.
-        const existingUser = existingUsers[0];
-        console.log(`Utilisateur existant trouvé via unique_key: ID ${existingUser.id}. Insertion évitée.`);
-        return res.json({ success: true, user: existingUser }); 
-    }
+        if (existingUsers && existingUsers.length > 0) {
+            // 3. Utilisateur trouvé. On retourne l'ID existant et on arrête le processus.
+            const existingUser = existingUsers[0];
+            console.log(`Utilisateur existant trouvé via unique_key: ID ${existingUser.id}.`);
+            return res.json({ success: true, user: existingUser }); 
+        }
 
-    // 4. Utilisateur non trouvé, on insère un nouveau
-    const { data, error: insertError } = await supabase
-        .from("utilisateurs")
-        .insert([{ 
-            nom, 
-            prenom, 
-            telephone, 
-            // 🎯 CORRECTION : Utilisation de 'reference_cnib' qui est le VRAI nom de la colonne dans votre DB.
-            reference_cnib: reference_cnib, 
-            email,
-            unique_key: uniqueKey // <-- Clé unique insérée
-        }])
-        // 🎯 CORRECTION : Colonne de sélection mise à jour à 'reference_cnib'
-        .select("id, nom, prenom, telephone, reference_cnib"); 
+        // 4. Utilisateur non trouvé, on insère un nouveau
+        const { data, error: insertError } = await supabase
+            .from("utilisateurs")
+            .insert([{ 
+                nom, 
+                prenom, 
+                telephone, 
+                reference_cnib, // Nom de la colonne DB
+                email,
+                unique_key: uniqueKey 
+            }])
+            .select("id, nom, prenom, telephone, reference_cnib")
+            .single(); // Assurez-vous d'avoir .single() pour ne pas retourner un tableau si la DB le permet
 
-    if (insertError) {
-        console.error("Erreur Supabase Inscription:", insertError.message);
-        return res.status(500).json({ 
-            error: "Erreur lors de l'inscription. Un conflit d'utilisateur non géré a été détecté.", 
-            details: insertError.message
+        if (insertError) {
+            console.error("Erreur Supabase Inscription:", insertError.message);
+            return res.status(500).json({ 
+                error: "Erreur lors de l'inscription. Un conflit d'utilisateur non géré a été détecté.", 
+                details: insertError.message
+            });
+        }
+        
+        // 5. Retourner le nouvel utilisateur inséré
+        res.json({ success: true, user: data });
+    } catch (error) {
+         // Bloc de sécurité pour les erreurs inattendues
+        console.error("Erreur imprévue lors de l'enregistrement:", error);
+        return res.status(500).json({
+            error: "Erreur serveur inattendue durant l'inscription.",
+            details: error.message || String(error)
         });
     }
-    
-    // 5. Retourner le nouvel utilisateur inséré
-    res.json({ success: true, user: data[0] });
 });
 
 
@@ -261,7 +273,7 @@ app.post("/api/payments", async (req, res) => {
         .from("utilisateurs")
         .select("telephone, email, nom, prenom") 
         .eq("id", userId)
-        .single();
+        .maybeSingle();
         
     if (userError || !userData) {
         console.error("Erreur Supabase: Utilisateur non trouvé pour le paiement:", userError?.message);
@@ -269,6 +281,7 @@ app.post("/api/payments", async (req, res) => {
     }
 
     const customerPhone = userData.telephone;
+    // L'email peut être null ou vide, PayDunya l'accepte
     const customerEmail = userData.email || "noreply@lotoemploi.com"; 
     const customerName = `${userData.prenom} ${userData.nom}`;
     
@@ -277,10 +290,9 @@ app.post("/api/payments", async (req, res) => {
 
     const paymentToken = `${Date.now()}-${userId}`;
 
-    // Les URLs de retour et de callback sont désormais sécurisées pour le Render
-    const BACKEND_URL = `https://loto-backend-83zb.onrender.com`; // Remplacez par votre URL Render
-    const RETURN_URL = `${BACKEND_URL}/api/payment-return/${paymentToken}`; 
-    const CALLBACK_URL = `${BACKEND_URL}/api/confirm-payment`; 
+    // ✅ CORRECTION CRITIQUE: Utilisation de la variable BASE_URL
+    const RETURN_URL = `${BASE_URL}/api/payment-return/${paymentToken}`; 
+    const CALLBACK_URL = `${BASE_URL}/api/confirm-payment`; 
 
     try {
         // ÉTAPE 2 : APPEL À L'API PAYDUNYA POUR CRÉER LA FACTURE
@@ -339,7 +351,7 @@ app.post("/api/payments", async (req, res) => {
         const checkoutUrl = responseData.response_text; 
 
         // ÉTAPE 3 : ENREGISTREMENT DANS SUPABASE
-        const { data, error } = await supabase
+        const { error: insertError } = await supabase
             .from("payments") 
             .insert([{ 
                 user_id: userId, 
@@ -349,11 +361,11 @@ app.post("/api/payments", async (req, res) => {
                 numtickets: numTickets, 
                 payment_token: paymentToken,
                 invoice_token: responseData.token 
-            }])
-            .select();
+            }]);
 
-        if (error) {
-            console.error("Erreur Supabase à l'insertion (Critique):", error.message); 
+        if (insertError) {
+            console.error("Erreur Supabase à l'insertion (Critique):", insertError.message); 
+            // Ce n'est pas fatal au client, mais on doit logguer l'erreur
         }
 
         // ÉTAPE 4 : RENVOI DE L'URL AU FRONTEND
@@ -378,22 +390,27 @@ app.post("/api/payments", async (req, res) => {
 app.get("/api/payments/status/:token", async (req, res) => {
     const { token } = req.params;
     
-    const { data: txData, error: txError } = await supabase
-        .from("payments")
-        .select("status, tickets, numtickets, totalamount, user_id") 
-        .eq("payment_token", token)
-        .single();
+    try {
+        const { data: txData, error: txError } = await supabase
+            .from("payments")
+            .select("status, tickets, numtickets, totalamount, user_id") 
+            .eq("payment_token", token)
+            .maybeSingle();
 
-    if (txError) {
-        return res.status(404).json({ status: "error", message: "Transaction introuvable ou erreur DB." });
+        if (txError || !txData) {
+            return res.status(404).json({ status: "error", message: "Transaction introuvable ou erreur DB." });
+        }
+
+        res.json({
+            status: txData.status,
+            tickets: txData.tickets,
+            nbTickets: txData.numtickets,
+            amount: txData.totalamount 
+        });
+    } catch (error) {
+        console.error("Erreur de récupération du statut de paiement:", error.message);
+        res.status(500).json({ status: "error", message: "Erreur serveur lors de la récupération du statut." });
     }
-
-    res.json({
-        status: txData.status,
-        tickets: txData.tickets,
-        nbTickets: txData.numtickets,
-        amount: txData.totalamount 
-    });
 });
 
 
@@ -401,26 +418,28 @@ app.get("/api/payments/status/:token", async (req, res) => {
 app.post("/api/confirm-payment", async (req, res) => {
     const payDuniaIPN = req.body || {}; 
     
+    // Tente de récupérer le token de la facture à partir des deux formats d'IPN PayDunya
     const invoiceToken = (payDuniaIPN.data && payDuniaIPN.data.invoice && payDuniaIPN.data.invoice.token) 
                        || payDuniaIPN.invoice_token; 
     
     if (!invoiceToken) {
         console.error("Webhook Erreur: Invoice Token manquant.", payDuniaIPN);
-        return res.status(200).send("Invoice Token manquant.");
+        return res.status(200).send("Invoice Token manquant."); // Toujours renvoyer 200 au webhook
     }
 
+    // 1. Chercher la transaction correspondante dans Supabase
     const { data: txData, error: txError } = await supabase
         .from("payments")
         .select("id, status, numtickets, user_id, payment_token") 
         .eq("invoice_token", invoiceToken) 
-        .single();
+        .maybeSingle();
     
     if (txError || !txData) {
         console.error("Webhook Erreur: Transaction non trouvée avec l'Invoice Token.", invoiceToken);
         return res.status(200).send("Transaction DB non trouvée.");
     }
-
-    // VÉRIFICATION DU STATUT DE LA TRANSACTION VIA L'API DE VÉRIFICATION PAYDUNYA
+    
+    // 2. VÉRIFICATION DU STATUT DE LA TRANSACTION VIA L'API DE VÉRIFICATION PAYDUNYA
     try {
         const verificationResponse = await axios.get(
             `${PAYDUNYA_VERIFY_URL}${invoiceToken}`,
@@ -449,7 +468,7 @@ app.post("/api/confirm-payment", async (req, res) => {
                     }
                 }
                 
-                // Mettre à jour le statut et générer les tickets
+                // Mettre à jour le statut et les tickets
                 const { error: updateError } = await supabase.from("payments").update({ 
                     status: "paid", 
                     tickets: tickets 
@@ -465,7 +484,7 @@ app.post("/api/confirm-payment", async (req, res) => {
                         .from("utilisateurs")
                         .select("telephone")
                         .eq("id", txData.user_id)
-                        .single();
+                        .maybeSingle();
                         
                     if (userData?.telephone) {
                         sendWhatsAppTicket(userData.telephone, tickets, txData.payment_token);
@@ -481,6 +500,7 @@ app.post("/api/confirm-payment", async (req, res) => {
          console.error("Erreur Webhook lors de la vérification de statut PayDunia:", error.message);
     }
     
+    // Le webhook doit TOUJOURS répondre 200 OK pour éviter les renvois
     res.status(200).send("Webhook PayDunya reçu et traité.");
 });
 
@@ -489,19 +509,22 @@ app.post("/api/confirm-payment", async (req, res) => {
 app.get("/api/payment-return/:token", async (req, res) => {
     const { token } = req.params; 
     
+    // Récupère l'URL du frontend pour la redirection
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'https://loto-frontend.onrender.com';
+    
     const { data: txData, error: txError } = await supabase
         .from("payments")
         .select("status") 
         .eq("payment_token", token)
-        .single();
+        .maybeSingle();
         
     if (txError || !txData) {
         console.error(`Erreur Redirection : Transaction introuvable pour le token ${token}`);
         // Redirige vers une page d'erreur en cas de problème critique
-        return res.redirect(302, `https://loto-frontend.onrender.com/status/error?msg=TX_NOT_FOUND`);
+        return res.redirect(302, `${FRONTEND_URL}/status/error?msg=TX_NOT_FOUND`);
     }
 
-    const finalFrontendUrl = `https://loto-frontend.onrender.com/status/${token}`;
+    const finalFrontendUrl = `${FRONTEND_URL}/status/${token}`;
 
     console.log(`✅ Redirection vers la page de tickets pour le token: ${token}. Statut: ${txData.status}`);
     
@@ -512,5 +535,4 @@ app.get("/api/payment-return/:token", async (req, res) => {
 
 // --- DÉMARRAGE DU SERVEUR ---
 
-const PORT = process.env.PORT || 10000; 
-app.listen(PORT, () => console.log(`🚀 Serveur démarré sur le port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Serveur démarré sur le port ${PORT}. BASE_URL: ${BASE_URL}`));
