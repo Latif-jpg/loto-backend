@@ -18,8 +18,9 @@ app.use(express.urlencoded({ extended: true }));
 // ⚡ Définition de l'URL de base pour les webhooks (CRITIQUE)
 // Cela permet de garantir que les URLs de callback PayDunya sont correctes.
 const PORT = process.env.PORT || 10000; 
-const BASE_URL = process.env.SERVER_BASE_URL || `http://localhost:${PORT}`;
-
+// 🎯 Utilise SERVER_BASE_URL (doit être configuré sur Render, ex: https://loto-backend-83zb.onrender.com)
+const BASE_URL = process.env.SERVER_BASE_URL || `http://localhost:${PORT}`; 
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://loto-frontend.onrender.com';
 
 // --- CONFIGURATION PAYDUNYA (Vos clés sont dans .env) ---
 const PAYDUNYA_MASTER_KEY = process.env.PAYDUNYA_MASTER_KEY; 
@@ -27,7 +28,7 @@ const PAYDUNYA_PRIVATE_KEY = process.env.PAYDUNYA_PRIVATE_KEY;
 const PAYDUNYA_TOKEN = process.env.PAYDUNYA_TOKEN; 
 const PAYDUNYA_PUBLIC_KEY = process.env.PAYDUNYA_PUBLIC_KEY; 
 
-// Utiliser les vraies URLs PayDunya, ou celles de sandbox si vous êtes sûr
+// Utiliser les URLs de sandbox si vous êtes en phase de test
 const PAYDUNYA_API_URL = `https://app.paydunya.com/sandbox-api/v1/checkout-invoice/create`;
 const PAYDUNYA_VERIFY_URL = `https://app.paydunya.com/sandbox-api/v1/checkout-invoice/confirm/`;
 
@@ -43,7 +44,7 @@ const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN ? twilio(TWILIO_ACC
 const allowedOrigins = [
     'http://localhost:5173', 
     'http://localhost:4000', 
-    'https://loto-frontend.onrender.com' 
+    FRONTEND_URL 
 ];
 
 const corsOptions = {
@@ -51,8 +52,8 @@ const corsOptions = {
         if (!origin || allowedOrigins.indexOf(origin) !== -1) {
             callback(null, true);
         } else {
-            console.error(`CORS: Origin ${origin} not allowed.`);
-            callback(new Error('Not allowed by CORS'), false); 
+            console.error(`CORS: Origin ${origin} non autorisé.`);
+            callback(new Error('Non autorisé par CORS'), false); 
         }
     },
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
@@ -84,7 +85,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const createUniqueKey = (nom, prenom, telephone, reference_cnib) => {
     const normalize = (str) => {
         const safeStr = String(str || '').trim(); 
-        if (safeStr === 'null' || safeStr === 'undefined') return ''; // Gérer les chaînes vides
+        if (safeStr === 'null' || safeStr === 'undefined') return '';
         
         return safeStr
                .toLowerCase()
@@ -103,7 +104,6 @@ const createUniqueKey = (nom, prenom, telephone, reference_cnib) => {
 
     return key;
 };
-
 
 // Logique pour obtenir le code suivant (ex: A000 -> A001)
 const getNextCode = (currentCode) => {
@@ -149,7 +149,7 @@ async function generateAndStoreTicketCode() {
     // 2. Calculer le nouveau code
     newCode = getNextCode(oldCode);
 
-    // 3. Mettre à jour dans la DB (upsert pour gérer la création si la ligne n'existe pas)
+    // 3. Mettre à jour dans la DB (upsert)
     const { error: updateError } = await supabase
         .from('configuration')
         .upsert([{ key: 'last_ticket_code', value: newCode }], { onConflict: 'key' }); 
@@ -170,12 +170,10 @@ async function sendWhatsAppTicket(recipientNumber, ticketList, paymentToken) {
         return;
     }
 
-    // Assurez-vous que le numéro est au format WhatsApp (ex: whatsapp:+226xxxxxxx)
-    // On assume que le numéro du Bénin commence par +226
     const whatsappRecipient = 'whatsapp:+226' + recipientNumber.replace(/\s/g, ''); 
     
     const tickets = ticketList.join(', ');
-    const frontendUrl = `https://loto-frontend.onrender.com/status/${paymentToken}`;
+    const frontendUrl = `${FRONTEND_URL}/status/${paymentToken}`;
 
     try {
         await twilioClient.messages.create({
@@ -200,7 +198,7 @@ app.get("/", (req, res) => res.send("Backend LotoEmploi fonctionne ! Version fin
 
 // 0. Route d'Inscription Utilisateur (Table: utilisateurs) - FIND OR CREATE
 app.post("/api/register-user", async (req, res) => {
-    // 🎯 SIMPLIFICATION : Renomme reference_cni (frontend) en reference_cnib (DB) à la déstructuration
+    // 🎯 Déstructuration: Renomme 'reference_cni' (envoyé par le frontend) en 'reference_cnib' (nom de la colonne DB)
     const { nom, prenom, telephone, reference_cni: reference_cnib, email } = req.body; 
 
     // 0. Vérification des données critiques
@@ -211,7 +209,7 @@ app.post("/api/register-user", async (req, res) => {
     const uniqueKey = createUniqueKey(nom, prenom, telephone, reference_cnib);
 
     try {
-        // 2. Chercher un utilisateur existant en utilisant la clé unique
+        // 2. Chercher un utilisateur existant
         let { data: existingUsers, error: searchError } = await supabase
             .from("utilisateurs")
             .select("id")
@@ -223,9 +221,8 @@ app.post("/api/register-user", async (req, res) => {
         }
 
         if (existingUsers && existingUsers.length > 0) {
-            // 3. Utilisateur trouvé. On retourne l'ID existant et on arrête le processus.
+            // 3. Utilisateur trouvé.
             const existingUser = existingUsers[0];
-            console.log(`Utilisateur existant trouvé via unique_key: ID ${existingUser.id}.`);
             return res.json({ success: true, user: existingUser }); 
         }
 
@@ -241,12 +238,12 @@ app.post("/api/register-user", async (req, res) => {
                 unique_key: uniqueKey 
             }])
             .select("id, nom, prenom, telephone, reference_cnib")
-            .single(); // Assurez-vous d'avoir .single() pour ne pas retourner un tableau si la DB le permet
+            .single(); 
 
         if (insertError) {
             console.error("Erreur Supabase Inscription:", insertError.message);
             return res.status(500).json({ 
-                error: "Erreur lors de l'inscription. Un conflit d'utilisateur non géré a été détecté.", 
+                error: "Erreur lors de l'inscription.", 
                 details: insertError.message
             });
         }
@@ -254,7 +251,6 @@ app.post("/api/register-user", async (req, res) => {
         // 5. Retourner le nouvel utilisateur inséré
         res.json({ success: true, user: data });
     } catch (error) {
-         // Bloc de sécurité pour les erreurs inattendues
         console.error("Erreur imprévue lors de l'enregistrement:", error);
         return res.status(500).json({
             error: "Erreur serveur inattendue durant l'inscription.",
@@ -281,7 +277,6 @@ app.post("/api/payments", async (req, res) => {
     }
 
     const customerPhone = userData.telephone;
-    // L'email peut être null ou vide, PayDunya l'accepte
     const customerEmail = userData.email || "noreply@lotoemploi.com"; 
     const customerName = `${userData.prenom} ${userData.nom}`;
     
@@ -290,7 +285,7 @@ app.post("/api/payments", async (req, res) => {
 
     const paymentToken = `${Date.now()}-${userId}`;
 
-    // ✅ CORRECTION CRITIQUE: Utilisation de la variable BASE_URL
+    // Les URLs de retour et de callback utilisent la BASE_URL dynamique
     const RETURN_URL = `${BASE_URL}/api/payment-return/${paymentToken}`; 
     const CALLBACK_URL = `${BASE_URL}/api/confirm-payment`; 
 
@@ -365,7 +360,6 @@ app.post("/api/payments", async (req, res) => {
 
         if (insertError) {
             console.error("Erreur Supabase à l'insertion (Critique):", insertError.message); 
-            // Ce n'est pas fatal au client, mais on doit logguer l'erreur
         }
 
         // ÉTAPE 4 : RENVOI DE L'URL AU FRONTEND
@@ -418,13 +412,12 @@ app.get("/api/payments/status/:token", async (req, res) => {
 app.post("/api/confirm-payment", async (req, res) => {
     const payDuniaIPN = req.body || {}; 
     
-    // Tente de récupérer le token de la facture à partir des deux formats d'IPN PayDunya
     const invoiceToken = (payDuniaIPN.data && payDuniaIPN.data.invoice && payDuniaIPN.data.invoice.token) 
                        || payDuniaIPN.invoice_token; 
     
     if (!invoiceToken) {
         console.error("Webhook Erreur: Invoice Token manquant.", payDuniaIPN);
-        return res.status(200).send("Invoice Token manquant."); // Toujours renvoyer 200 au webhook
+        return res.status(200).send("Invoice Token manquant."); 
     }
 
     // 1. Chercher la transaction correspondante dans Supabase
@@ -480,7 +473,7 @@ app.post("/api/confirm-payment", async (req, res) => {
                     console.log(`Webhook Succès: Paiement ID ${txData.id} mis à jour à 'paid'.`);
                     
                     // ENVOI WHATSAPP 
-                    const { data: userData, error: userErr } = await supabase
+                    const { data: userData } = await supabase
                         .from("utilisateurs")
                         .select("telephone")
                         .eq("id", txData.user_id)
@@ -500,7 +493,6 @@ app.post("/api/confirm-payment", async (req, res) => {
          console.error("Erreur Webhook lors de la vérification de statut PayDunia:", error.message);
     }
     
-    // Le webhook doit TOUJOURS répondre 200 OK pour éviter les renvois
     res.status(200).send("Webhook PayDunya reçu et traité.");
 });
 
@@ -508,9 +500,6 @@ app.post("/api/confirm-payment", async (req, res) => {
 // 4. Route de Redirection Sécurisée (RETURN_URL PayDunya)
 app.get("/api/payment-return/:token", async (req, res) => {
     const { token } = req.params; 
-    
-    // Récupère l'URL du frontend pour la redirection
-    const FRONTEND_URL = process.env.FRONTEND_URL || 'https://loto-frontend.onrender.com';
     
     const { data: txData, error: txError } = await supabase
         .from("payments")
@@ -520,7 +509,6 @@ app.get("/api/payment-return/:token", async (req, res) => {
         
     if (txError || !txData) {
         console.error(`Erreur Redirection : Transaction introuvable pour le token ${token}`);
-        // Redirige vers une page d'erreur en cas de problème critique
         return res.redirect(302, `${FRONTEND_URL}/status/error?msg=TX_NOT_FOUND`);
     }
 
@@ -528,7 +516,6 @@ app.get("/api/payment-return/:token", async (req, res) => {
 
     console.log(`✅ Redirection vers la page de tickets pour le token: ${token}. Statut: ${txData.status}`);
     
-    // Redirection finale vers l'URL du frontend
     return res.redirect(302, finalFrontendUrl); 
 });
 
