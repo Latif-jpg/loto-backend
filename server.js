@@ -359,8 +359,12 @@ app.post("/api/payments", async (req, res) => {
             console.error("Erreur Supabase à l'insertion (Critique):", insertError.message); 
         }
 
-        // ÉTAPE 4 : RENVOI DE L'URL AU FRONTEND
-        res.json({ success: true, checkoutPageUrlWithPaymentToken: checkoutUrl });
+        // ÉTAPE 4 : RENVOI DE L'URL ET DU TOKEN AU FRONTEND (CORRIGÉ !)
+        res.json({ 
+            success: true, 
+            checkoutPageUrlWithPaymentToken: checkoutUrl,
+            paymentToken: paymentToken // 🎯 Correction: Ajout du token
+        });
 
     } catch (apiError) {
         console.error("Erreur API PayDunya (Requête POST échouée):", apiError.response ? apiError.response.data : apiError.message);
@@ -385,30 +389,30 @@ app.get("/api/payments/status/:token", async (req, res) => {
         const { data: txData, error: txError } = await supabase
             .from("payments")
             .select(`
-                status, 
-                tickets, 
-                numtickets, 
-                totalamount, 
-                user_id,
-                // 🟢 CORRECTION: Jointure pour récupérer les infos client
-                utilisateurs ( nom, prenom, telephone, reference_cnib )
-            `) 
+                status, 
+                tickets, 
+                numtickets, 
+                totalamount, 
+                user_id,
+                // 🟢 CORRECTION: Jointure pour récupérer les infos client
+                utilisateurs ( nom, prenom, telephone, reference_cnib )
+            `) 
             .eq("payment_token", token)
             .maybeSingle();
 
         if (txError || !txData) {
             return res.status(404).json({ status: "error", message: "Transaction introuvable ou erreur DB." });
         }
-        
-        // Récupération des infos utilisateur imbriquées
-        const clientInfo = txData.utilisateurs || null; 
+        
+        // Récupération des infos utilisateur imbriquées
+        const clientInfo = txData.utilisateurs || null; 
 
         res.json({
             status: txData.status,
             tickets: txData.tickets,
             nbTickets: txData.numtickets,
             amount: txData.totalamount,
-            client: clientInfo // 🟢 Ajout des infos client à la réponse
+            client: clientInfo // 🟢 Ajout des infos client à la réponse
         });
     } catch (error) {
         console.error("Erreur de récupération du statut de paiement:", error.message);
